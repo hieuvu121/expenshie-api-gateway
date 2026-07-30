@@ -14,7 +14,7 @@ public class GatewayConfig {
                 .route("auth-service",    r -> r.path("/app/v1/auth/**", "/app/v1/users/**", "/app/v1/activate")
                         .uri("lb://auth-service"))
                 // expense-service must be before household-service — it handles /households/*/expenses/**
-                .route("expense-service", r -> r.path("/app/v1/households/*/expenses/**", "/app/v1/households/*/expenses")
+                .route("expense-service", r -> r.path("/app/v1/households/*/expenses/**", "/app/v1/households/*/expenses","/app/v1/households/*/suggestions")
                         .uri("lb://expense-service"))
                 .route("household-service", r -> r.path("/app/v1/households/**")
                         .uri("lb://household-service"))
