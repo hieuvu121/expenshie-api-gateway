@@ -1,6 +1,10 @@
 package com.be9expensphie.gateway.filter;
 import com.be9expensphie.gateway.util.JwtUtil;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import io.jsonwebtoken.Claims;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
 import org.springframework.http.HttpHeaders;
@@ -13,6 +17,8 @@ import reactor.core.publisher.Mono;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 
+import jakarta.annotation.PostConstruct;
+import java.time.Duration;
 import java.util.List;
 
 @Component
@@ -20,6 +26,30 @@ import java.util.List;
 public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
     private final JwtUtil jwtUtil;
     private final ReactiveRedisTemplate<String,String> reactiveRedisTemplate;
+
+    /**
+     * Every request previously made a Redis round-trip (~0.28ms measured) to
+     * check the logout blacklist. This caches that answer locally.
+     *
+     * TRADE-OFF: a token revoked by logout stays usable until its entry expires
+     * here. Set app.jwt.blacklist-cache-ttl-seconds to 0 to disable the cache
+     * and always consult Redis.
+     */
+    @Value("${app.jwt.blacklist-cache-ttl-seconds:10}")
+    private long blacklistCacheTtlSeconds;
+
+    @Value("${app.jwt.blacklist-cache-max-size:20000}")
+    private long blacklistCacheMaxSize;
+
+    private Cache<String, Boolean> blacklistCache;
+
+    @PostConstruct
+    void initCache() {
+        this.blacklistCache = Caffeine.newBuilder()
+                .expireAfterWrite(Duration.ofSeconds(Math.max(blacklistCacheTtlSeconds, 0)))
+                .maximumSize(blacklistCacheMaxSize)
+                .build();
+    }
 
     private static final List<String> PUBLIC_PATHS = List.of(
             "/app/v1/auth/login",
@@ -49,24 +79,37 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
 
         String token=authHeader.substring(7);
 
-        if(!jwtUtil.isTokenValid(token)){
+        // One parse per request. Previously isTokenValid/extractUserId/extractEmail
+        // each parsed and HMAC-verified the token separately — three times over.
+        Claims claims = jwtUtil.parseIfValid(token);
+        if (claims == null) {
             return unauthorized(exchange);
         }
 
-        return reactiveRedisTemplate.hasKey("blacklist:" +token)
-                .flatMap(isBlacklisted->{
-                    if(Boolean.TRUE.equals(isBlacklisted)){
-                        return unauthorized(exchange);
-                    }
-                    Long userId= jwtUtil.extractUserId(token);
-                    String email=jwtUtil.extractEmail(token);
+        Boolean cached = blacklistCache.getIfPresent(token);
+        if (cached != null) {
+            return Boolean.TRUE.equals(cached) ? unauthorized(exchange) : forward(exchange, chain, claims);
+        }
 
-                    ServerHttpRequest mutated=exchange.getRequest().mutate()
-                            .header("X-User-Id",userId!=null? userId.toString():"")
-                            .header("X-User-Email",email!=null?email.toString():"")
-                            .build();
-                    return chain.filter(exchange.mutate().request(mutated).build());
+        return reactiveRedisTemplate.hasKey("blacklist:" + token)
+                .defaultIfEmpty(Boolean.FALSE)
+                .flatMap(isBlacklisted -> {
+                    blacklistCache.put(token, Boolean.TRUE.equals(isBlacklisted));
+                    return Boolean.TRUE.equals(isBlacklisted)
+                            ? unauthorized(exchange)
+                            : forward(exchange, chain, claims);
                 });
+    }
+
+    private Mono<Void> forward(ServerWebExchange exchange, GatewayFilterChain chain, Claims claims) {
+        Long userId = claims.get("userId", Long.class);
+        String email = claims.getSubject();
+
+        ServerHttpRequest mutated = exchange.getRequest().mutate()
+                .header("X-User-Id", userId != null ? userId.toString() : "")
+                .header("X-User-Email", email != null ? email : "")
+                .build();
+        return chain.filter(exchange.mutate().request(mutated).build());
     }
 
     @Override
