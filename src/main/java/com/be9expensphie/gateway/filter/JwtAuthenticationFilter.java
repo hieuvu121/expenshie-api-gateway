@@ -59,8 +59,18 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
             "/app/v1/auth/reset-password"
     );
 
+    /*
+     * Indexed loop rather than a stream: this runs on every request, including
+     * authenticated ones, and a stream pipeline plus a capturing lambda is a
+     * per-request allocation to compare five constant prefixes.
+     */
     private boolean isPublicPath(String path) {
-        return PUBLIC_PATHS.stream().anyMatch(path::startsWith);
+        for (int i = 0; i < PUBLIC_PATHS.size(); i++) {
+            if (path.startsWith(PUBLIC_PATHS.get(i))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
