@@ -1,6 +1,7 @@
 package com.be9expensphie.gateway.util;
 
 import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtParser;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
@@ -8,8 +9,6 @@ import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
-import java.util.Date;
-import java.util.function.Function;
 
 @Component
 public class JwtUtil {
@@ -18,69 +17,46 @@ public class JwtUtil {
     private String secret;
 
     /**
-     * Derived once. This used to run per parse — and since the filter parsed the
-     * token three times per request (validate, extract id, extract email), every
-     * request re-encoded the secret to bytes and rebuilt the key three times.
+     * Parser and key are both built once and reused.
+     *
+     * The filter used to parse the token three times per request (validate,
+     * extract id, extract email), each parse re-encoding the secret and
+     * rebuilding the key. Memoizing the key fixed most of that, but every
+     * request still ran Jwts.parser()...build(), which constructs a
+     * DefaultJwtParser and resolves a Deserializer through a service lookup.
+     * JwtParser is thread-safe and meant to be built once, so it is cached the
+     * same way the key is.
      */
-    private volatile SecretKey signingKey;
+    private volatile JwtParser parser;
 
-    private SecretKey getSigningKey() {
-        SecretKey key = signingKey;
-        if (key == null) {
+    private JwtParser parser() {
+        JwtParser p = parser;
+        if (p == null) {
             synchronized (this) {
-                if (signingKey == null) {
-                    signingKey = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+                if (parser == null) {
+                    SecretKey key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+                    parser = Jwts.parser().verifyWith(key).build();
                 }
-                key = signingKey;
+                p = parser;
             }
         }
-        return key;
+        return p;
     }
 
     /**
      * Verify signature and expiry in a single parse, returning the claims so the
      * caller can read them without parsing again. Null when invalid or expired.
+     *
+     * parseSignedClaims already validates exp and throws ExpiredJwtException,
+     * so there is no second expiry check here - the previous one re-read the
+     * claim and allocated a Date per request to re-answer a question the parser
+     * had already answered.
      */
     public Claims parseIfValid(String token) {
         try {
-            Claims claims = extractAllClaims(token);
-            Date expiration = claims.getExpiration();
-            return (expiration == null || expiration.before(new Date())) ? null : claims;
+            return parser().parseSignedClaims(token).getPayload();
         } catch (Exception e) {
             return null;
-        }
-    }
-
-    public Claims extractAllClaims(String token) {
-        return Jwts.parser()
-                .verifyWith(getSigningKey())
-                .build()
-                .parseSignedClaims(token)
-                .getPayload();
-    }
-
-    public <T> T extractClaim(String token, Function<Claims, T> claimsResolver) {
-        return claimsResolver.apply(extractAllClaims(token));
-    }
-
-    public String extractEmail(String token) {
-        return extractClaim(token, Claims::getSubject);
-    }
-
-    public Long extractUserId(String token) {
-        return extractClaim(token, claims -> claims.get("userId", Long.class));
-    }
-
-    public boolean isTokenExpired(String token) {
-        Date expiration = extractClaim(token, Claims::getExpiration);
-        return expiration.before(new Date());
-    }
-
-    public boolean isTokenValid(String token) {
-        try {
-            return !isTokenExpired(token);
-        } catch (Exception e) {
-            return false;
         }
     }
 }
