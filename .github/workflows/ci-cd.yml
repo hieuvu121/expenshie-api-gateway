@@ -29,16 +29,22 @@ jobs:
       - name: Update dependency graph
         uses: advanced-security/maven-dependency-submission-action@571e99aab1055c2e71a1e2309b9691de18d6b7d6
 
+      # Everything below publishes or deploys. Guarded because this workflow also
+      # triggers on pull_request against main: without the condition, opening a PR
+      # would push :latest and restart the EC2 container, deploying unreviewed code.
       - name: Login to Docker Hub
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Set up Docker Buildx
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push docker img
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
@@ -46,6 +52,7 @@ jobs:
             --push .
 
       - name: SSH to EC2
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.EC2_HOST }}
