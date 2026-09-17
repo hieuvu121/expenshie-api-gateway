@@ -27,14 +27,6 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
     private final JwtUtil jwtUtil;
     private final ReactiveRedisTemplate<String,String> reactiveRedisTemplate;
 
-    /**
-     * Every request previously made a Redis round-trip (~0.28ms measured) to
-     * check the logout blacklist. This caches that answer locally.
-     *
-     * TRADE-OFF: a token revoked by logout stays usable until its entry expires
-     * here. Set app.jwt.blacklist-cache-ttl-seconds to 0 to disable the cache
-     * and always consult Redis.
-     */
     @Value("${app.jwt.blacklist-cache-ttl-seconds:10}")
     private long blacklistCacheTtlSeconds;
 
@@ -131,5 +123,9 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
         ServerHttpResponse response = exchange.getResponse();
         response.setStatusCode(HttpStatus.UNAUTHORIZED);
         return response.setComplete();
+    }
+
+    public void invalidate(String token){
+        blacklistCache.invalidate(token);
     }
 }
